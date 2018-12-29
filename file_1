@@ -1,0 +1,135 @@
+import pandas as pd
+import numpy as np
+
+# Считываем данные
+n = ['id', 'date', 'name', 'text', 'typr', 'rep', 'rtw', 'faw', 'stcount', 'foll', 'frien', 'listcount']
+data_positive = pd.read_csv('C:\positive.csv', sep=';', error_bad_lines=False, names=n, usecols=['text'])
+data_negative = pd.read_csv('C:\pegative.csv', sep=';', error_bad_lines=False, names=n, usecols=['text'])
+print(type(data_positive))
+# Формируем сбалансированный датасет
+sample_size = min(data_positive.shape[0], data_negative.shape[0])
+raw_data = np.concatenate((data_positive['text'].values[:sample_size],
+                           data_negative['text'].values[:sample_size]), axis=0)
+labels = [1] * sample_size + [0] * sample_size
+print(type(raw_data))
+import re
+
+def preprocess_text(text):
+    text = text.lower().replace("ё", "е")
+    text = re.sub('((www\.[^\s]+)|(https?://[^\s]+))', 'URL', text)
+    text = re.sub('@[^\s]+', 'USER', text)
+    text = re.sub('[^a-zA-Zа-яА-Я1-9]+', ' ', text)
+    text = re.sub(' +', ' ', text)
+    return text.strip()
+
+
+data = [preprocess_text(t) for t in raw_data]
+print(type(data))
+
+
+import codecs
+with codecs.open("tweets.txt", "w", "utf-8") as stream:   # or utf-8
+    for txt in data:
+        print(txt,  file=stream)
+
+
+
+
+from sklearn.model_selection import train_test_split
+
+x_train, x_test, y_train, y_test = train_test_split(data, labels, test_size=0.2, random_state=1)
+
+
+#import sqlite3
+
+# Открываем SQLite базу данных
+#conn = sqlite3.connect('C:/db.sql')
+#c = conn.cursor()
+
+#with open('tweets.txt', 'w', encoding='utf-8') as f:
+    # Считываем тексты твитов
+   # for row in c.execute('SELECT ttext FROM sentiment'):
+       # if row[0]:
+           # tweet = preprocess_text(row[0])
+            # Записываем предобработанные твиты в файл
+           # print(tweet, file=f)
+
+
+import logging
+import multiprocessing
+import gensim
+from gensim.models import Word2Vec
+
+# logging.basicConfig(format='%(asctime)s : %(levelname)s : %(message)s', level=logging.INFO)
+# Считываем файл с предобработанными твитами
+dt = gensim.models.word2vec.LineSentence('tweets.txt')
+# Обучаем модель
+model = Word2Vec(dt, size=200, window=5, min_count=3, workers=multiprocessing.cpu_count())
+# model.save("models/w2v/model.w2v")
+model.load_word2vec_format()
+from keras.preprocessing.text import Tokenizer
+from keras.preprocessing.sequence import pad_sequences
+
+# Высота матрицы (максимальное количество слов в твите)
+SENTENCE_LENGTH = 26
+# Размер словаря
+NUM = 100000
+
+def get_sequences(tokenizer, x):
+    sequences = tokenizer.texts_to_sequences(x)
+    return pad_sequences(sequences, maxlen=SENTENCE_LENGTH)
+
+# Cоздаем и обучаем токенизатор
+tokenizer = Tokenizer(num_words=NUM)
+tokenizer.fit_on_texts(x_train)
+
+# Отображаем каждый текст в массив идентификаторов токенов
+x_train_seq = get_sequences(tokenizer, x_train)
+x_test_seq = get_sequences(tokenizer, x_test)
+
+
+from keras.layers import Input
+from keras.layers.embeddings import Embedding
+
+tweet_input = Input(shape=(SENTENCE_LENGTH,), dtype='int32')
+tweet_encoder = Embedding(NUM, DIM, input_length=SENTENCE_LENGTH,
+                          weights=[embedding_matrix], trainable=False)(tweet_input)
+
+from keras import optimizers
+from keras.layers import Dense, concatenate, Activation, Dropout
+from keras.models import Model
+from keras.layers.convolutional import Conv1D
+from keras.layers.pooling import GlobalMaxPooling1D
+
+branches = []
+# Добавляем dropout-регуляризацию
+x = Dropout(0.2)(tweet_encoder)
+
+for size, filters_count in [(2, 10), (3, 10), (4, 10), (5, 10)]:
+    for i in range(filters_count):
+        # Добавляем слой свертки
+        branch = Conv1D(filters=1, kernel_size=size, padding='valid', activation='relu')(x)
+        # Добавляем слой субдискретизации
+        branch = GlobalMaxPooling1D()(branch)
+        branches.append(branch)
+# Конкатенируем карты признаков
+x = concatenate(branches, axis=1)
+# Добавляем dropout-регуляризацию
+x = Dropout(0.2)(x)
+x = Dense(30, activation='relu')(x)
+x = Dense(1)(x)
+output = Activation('sigmoid')(x)
+
+model = Model(inputs=[tweet_input], outputs=[output])
+
+model.compile(loss='binary_crossentropy', optimizer='adam', metrics=[precision, recall, f1])
+model.summary()
+
+
+from keras.callbacks import ModelCheckpoint
+
+checkpoint = ModelCheckpoint("models/cnn/cnn-frozen-embeddings-{epoch:02d}-{val_f1:.2f}.hdf5", monitor='val_f1', save_best_only=True, mode='max', period=1)
+history = model.fit(x_train_seq, y_train, batch_size=32, epochs=10, validation_split=0.25, callbacks = [checkpoint])
+
+
+"""
